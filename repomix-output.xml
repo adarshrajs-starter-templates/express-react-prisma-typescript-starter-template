@@ -1,0 +1,1150 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files and files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: frontend/**, backend/**, package.json, README.md, repomix.config.json, .gitignore
+- Files matching these patterns are excluded: **/node_modules/**, **/dist/**, **/coverage/**, repomix-output.xml
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+backend/
+  prisma/
+    schema.prisma
+    seed.ts
+  src/
+    config/
+      env.ts
+    lib/
+      prisma.ts
+    middleware/
+      auth.ts
+      errors.ts
+      origin.ts
+    routes/
+      auth.routes.ts
+      tasks.routes.ts
+      users.routes.ts
+    types/
+      express.d.ts
+    app.ts
+    server.ts
+  .env
+  .env.example
+  package.json
+  tsconfig.json
+frontend/
+  src/
+    api.ts
+    App.tsx
+    main.tsx
+    styles.css
+  .env
+  .env.example
+  index.html
+  package.json
+  tsconfig.app.json
+  tsconfig.json
+  tsconfig.node.json
+  vite.config.ts
+.gitignore
+package.json
+README.md
+repomix.config.json
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="backend/prisma/schema.prisma">
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(USER)
+  isActive     Boolean  @default(true)
+  tasks        Task[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  completed   Boolean  @default(false)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId, createdAt])
+}
+</file>
+
+<file path="backend/prisma/seed.ts">
+import "dotenv/config";
+import { PrismaClient, Role } from "@prisma/client";
+import bcrypt from "bcryptjs";
+
+const prisma = new PrismaClient();
+
+async function main() {
+  const name = process.env.SUPER_ADMIN_NAME?.trim() || "Super Admin";
+  const email = process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase() || "admin@example.com";
+  const password = process.env.SUPER_ADMIN_PASSWORD;
+  if (!password || password.length < 8) {
+    throw new Error("SUPER_ADMIN_PASSWORD must be configured and at least 8 characters long.");
+  }
+  const passwordHash = await bcrypt.hash(password, 12);
+  await prisma.user.upsert({
+    where: { email },
+    update: { name, passwordHash, role: Role.SUPER_ADMIN, isActive: true },
+    create: { name, email, passwordHash, role: Role.SUPER_ADMIN, isActive: true },
+  });
+  console.log(`Super admin seeded: ${email}`);
+}
+
+main()
+  .catch((error: unknown) => { console.error(error); process.exitCode = 1; })
+  .finally(async () => { await prisma.$disconnect(); });
+</file>
+
+<file path="backend/src/config/env.ts">
+import "dotenv/config";
+import { z } from "zod";
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  PORT: z.coerce.number().int().positive().default(4000),
+  DATABASE_URL: z.string().min(1),
+  JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
+  JWT_EXPIRES_IN: z.string().default("1d"),
+  CORS_ORIGINS: z.string().default("http://localhost:5173,http://127.0.0.1:5173"),
+});
+
+const parsed = envSchema.safeParse(process.env);
+if (!parsed.success) {
+  console.error("Invalid environment configuration:", parsed.error.flatten().fieldErrors);
+  throw new Error("Invalid backend environment configuration. Check backend/.env.");
+}
+
+export const env = {
+  ...parsed.data,
+  corsOrigins: parsed.data.CORS_ORIGINS.split(",").map((origin) => origin.trim().replace(/\/+$/, "")).filter(Boolean),
+};
+</file>
+
+<file path="backend/src/lib/prisma.ts">
+import { PrismaClient } from "@prisma/client";
+
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+export const prisma = globalForPrisma.prisma ?? new PrismaClient();
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+</file>
+
+<file path="backend/src/middleware/auth.ts">
+import type { NextFunction, Request, Response } from "express";
+import jwt from "jsonwebtoken";
+import { Role } from "@prisma/client";
+import { env } from "../config/env.js";
+
+interface TokenPayload { sub: string; role: Role; }
+export function authenticate(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith("Bearer ")) {
+    res.status(401).json({ message: "Authentication required." });
+    return;
+  }
+  try {
+    const payload = jwt.verify(header.slice(7), env.JWT_SECRET) as jwt.JwtPayload & TokenPayload;
+    if (typeof payload.sub !== "string" || !Object.values(Role).includes(payload.role)) {
+      res.status(401).json({ message: "Invalid authentication token." });
+      return;
+    }
+    req.auth = { userId: payload.sub, role: payload.role };
+    next();
+  } catch {
+    res.status(401).json({ message: "Invalid or expired token." });
+  }
+}
+
+export function authorize(...roles: Role[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.auth) { res.status(401).json({ message: "Authentication required." }); return; }
+    if (!roles.includes(req.auth.role)) { res.status(403).json({ message: "You do not have permission to perform this action." }); return; }
+    next();
+  };
+}
+</file>
+
+<file path="backend/src/middleware/errors.ts">
+import type { ErrorRequestHandler, RequestHandler } from "express";
+import { ZodError } from "zod";
+
+export const notFound: RequestHandler = (_req, res) => {
+  res.status(404).json({ message: "Route not found." });
+};
+
+export const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
+  if (error instanceof ZodError) {
+    res.status(400).json({ message: "Validation failed.", errors: error.flatten().fieldErrors });
+    return;
+  }
+  console.error(error);
+  res.status(500).json({ message: "Internal server error." });
+};
+</file>
+
+<file path="backend/src/middleware/origin.ts">
+import type { NextFunction, Request, Response } from "express";
+import { env } from "../config/env.js";
+
+/**
+ * Browser-origin allowlist. This is not a substitute for authentication or a network firewall:
+ * non-browser clients can omit/spoof Origin headers. CORS controls browser JavaScript access.
+ */
+export function enforceOrigin(req: Request, res: Response, next: NextFunction) {
+  const origin = req.get("origin");
+  if (!origin) { next(); return; } // CLI, health checks, and server-to-server clients may omit Origin.
+  const normalized = origin.replace(/\/+$/, "");
+  if (!env.corsOrigins.includes(normalized)) {
+    res.status(403).json({ message: "Origin is not allowed." });
+    return;
+  }
+  next();
+}
+</file>
+
+<file path="backend/src/routes/auth.routes.ts">
+import { Router } from "express";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import { Role } from "@prisma/client";
+import { z } from "zod";
+import { prisma } from "../lib/prisma.js";
+import { env } from "../config/env.js";
+import { authenticate } from "../middleware/auth.js";
+
+export const authRouter = Router();
+const publicUser = (user: { id: string; name: string; email: string; role: Role; isActive: boolean }) => user;
+const registerSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
+  password: z.string().min(8).max(128),
+});
+
+authRouter.post("/register", async (req, res, next) => {
+  try {
+    const input = registerSchema.parse(req.body);
+    const existing = await prisma.user.findUnique({ where: { email: input.email } });
+    if (existing) { res.status(409).json({ message: "An account with this email already exists." }); return; }
+    const passwordHash = await bcrypt.hash(input.password, 12);
+    const profile = { name: input.name, email: input.email };
+    const user = await prisma.user.create({ data: { ...profile, passwordHash, role: Role.USER }, select: { id: true, name: true, email: true, role: true, isActive: true } });
+    const token = jwt.sign({ role: user.role }, env.JWT_SECRET, { subject: user.id, expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"] });
+    res.status(201).json({ user: publicUser(user), token });
+  } catch (error) { next(error); }
+});
+
+authRouter.post("/login", async (req, res, next) => {
+  try {
+    const input = z.object({ email: z.string().trim().email().transform((value) => value.toLowerCase()), password: z.string().min(1).max(128) }).parse(req.body);
+    const user = await prisma.user.findUnique({ where: { email: input.email } });
+    if (!user || !user.isActive || !(await bcrypt.compare(input.password, user.passwordHash))) {
+      res.status(401).json({ message: "Invalid email or password." }); return;
+    }
+    const token = jwt.sign({ role: user.role }, env.JWT_SECRET, { subject: user.id, expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"] });
+    res.json({ user: publicUser(user), token });
+  } catch (error) { next(error); }
+});
+
+authRouter.get("/me", authenticate, async (req, res, next) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.auth!.userId }, select: { id: true, name: true, email: true, role: true, isActive: true } });
+    if (!user || !user.isActive) { res.status(401).json({ message: "Account is unavailable." }); return; }
+    res.json({ user });
+  } catch (error) { next(error); }
+});
+</file>
+
+<file path="backend/src/routes/tasks.routes.ts">
+import { Router } from "express";
+import { Role } from "@prisma/client";
+import { z } from "zod";
+import { prisma } from "../lib/prisma.js";
+import { authenticate } from "../middleware/auth.js";
+
+export const tasksRouter = Router();
+tasksRouter.use(authenticate);
+
+const taskInput = z.object({
+  title: z.string().trim().min(1).max(160).optional(),
+  description: z.string().trim().max(2000).nullable().optional(),
+  completed: z.boolean().optional(),
+}).refine((value) => Object.keys(value).length > 0, { message: "At least one field is required." });
+
+function canReadAll(role: Role) { return role === Role.ADMIN || role === Role.SUPER_ADMIN; }
+
+tasksRouter.get("/", async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit ?? "10"), 10) || 10));
+    const where = canReadAll(req.auth!.role) ? {} : { userId: req.auth!.userId };
+    const [data, total] = await Promise.all([
+      prisma.task.findMany({ where, orderBy: { createdAt: "desc" }, skip: (page - 1) * limit, take: limit }),
+      prisma.task.count({ where }),
+    ]);
+    res.json({ data, page, limit, total, pages: Math.ceil(total / limit) });
+  } catch (error) { next(error); }
+});
+
+tasksRouter.post("/", async (req, res, next) => {
+  try {
+    const input = z.object({ title: z.string().trim().min(1).max(160), description: z.string().trim().max(2000).optional() }).parse(req.body);
+    const task = await prisma.task.create({ data: { ...input, userId: req.auth!.userId } });
+    res.status(201).json({ task });
+  } catch (error) { next(error); }
+});
+
+tasksRouter.get("/:id", async (req, res, next) => {
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!task || (!canReadAll(req.auth!.role) && task.userId !== req.auth!.userId)) { res.status(404).json({ message: "Task not found." }); return; }
+    res.json({ task });
+  } catch (error) { next(error); }
+});
+
+tasksRouter.patch("/:id", async (req, res, next) => {
+  try {
+    const input = taskInput.parse(req.body);
+    const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!existing || (!canReadAll(req.auth!.role) && existing.userId !== req.auth!.userId)) { res.status(404).json({ message: "Task not found." }); return; }
+    const task = await prisma.task.update({ where: { id: existing.id }, data: input });
+    res.json({ task });
+  } catch (error) { next(error); }
+});
+
+tasksRouter.delete("/:id", async (req, res, next) => {
+  try {
+    const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!existing || (!canReadAll(req.auth!.role) && existing.userId !== req.auth!.userId)) { res.status(404).json({ message: "Task not found." }); return; }
+    await prisma.task.delete({ where: { id: existing.id } });
+    res.status(204).send();
+  } catch (error) { next(error); }
+});
+</file>
+
+<file path="backend/src/routes/users.routes.ts">
+import { Router } from "express";
+import { Role } from "@prisma/client";
+import { z } from "zod";
+import { prisma } from "../lib/prisma.js";
+import { authenticate, authorize } from "../middleware/auth.js";
+
+export const usersRouter = Router();
+usersRouter.use(authenticate, authorize(Role.ADMIN, Role.SUPER_ADMIN));
+
+usersRouter.get("/", async (_req, res, next) => {
+  try {
+    const users = await prisma.user.findMany({
+      select: { id: true, name: true, email: true, role: true, isActive: true, createdAt: true },
+      orderBy: { createdAt: "desc" }, take: 200,
+    });
+    res.json({ data: users });
+  } catch (error) { next(error); }
+});
+
+usersRouter.patch("/:id/role", authorize(Role.SUPER_ADMIN), async (req, res, next) => {
+  try {
+    const { role } = z.object({ role: z.nativeEnum(Role) }).parse(req.body);
+    if (req.params.id === req.auth!.userId && role !== Role.SUPER_ADMIN) {
+      res.status(400).json({ message: "You cannot remove your own super-admin role." }); return;
+    }
+    const user = await prisma.user.update({
+      where: { id: req.params.id }, data: { role },
+      select: { id: true, name: true, email: true, role: true, isActive: true },
+    });
+    res.json({ user });
+  } catch (error) { next(error); }
+});
+
+usersRouter.patch("/:id/status", async (req, res, next) => {
+  try {
+    const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
+    if (req.params.id === req.auth!.userId && !isActive) {
+      res.status(400).json({ message: "You cannot deactivate your own account." }); return;
+    }
+    const user = await prisma.user.update({
+      where: { id: req.params.id }, data: { isActive },
+      select: { id: true, name: true, email: true, role: true, isActive: true },
+    });
+    res.json({ user });
+  } catch (error) { next(error); }
+});
+</file>
+
+<file path="backend/src/types/express.d.ts">
+import type { Role } from "@prisma/client";
+
+declare global {
+  namespace Express {
+    interface Request {
+      auth?: { userId: string; role: Role };
+    }
+  }
+}
+export {};
+</file>
+
+<file path="backend/src/app.ts">
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { env } from "./config/env.js";
+import { enforceOrigin } from "./middleware/origin.js";
+import { errorHandler, notFound } from "./middleware/errors.js";
+import { authRouter } from "./routes/auth.routes.js";
+import { tasksRouter } from "./routes/tasks.routes.js";
+import { usersRouter } from "./routes/users.routes.js";
+
+export const app = express();
+app.disable("x-powered-by");
+app.use(helmet());
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || env.corsOrigins.includes(origin.replace(/\/+$/, ""))) {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  maxAge: 600,
+}));
+app.use(enforceOrigin);
+app.use(express.json({ limit: "1mb" }));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: "draft-7", legacyHeaders: false }));
+
+app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "starter-api", timestamp: new Date().toISOString() }));
+app.use("/api/auth", authRouter);
+app.use("/api/tasks", tasksRouter);
+app.use("/api/users", usersRouter);
+app.use(notFound);
+app.use(errorHandler);
+</file>
+
+<file path="backend/src/server.ts">
+import { app } from "./app.js";
+import { env } from "./config/env.js";
+import { prisma } from "./lib/prisma.js";
+
+const server = app.listen(env.PORT, "0.0.0.0", () => {
+  console.log(`REST API listening on http://localhost:${env.PORT}`);
+  console.log(`Environment: ${env.NODE_ENV}`);
+});
+
+async function shutdown(signal: string) {
+  console.log(`${signal} received; shutting down gracefully...`);
+  server.close(async () => {
+    await prisma.$disconnect();
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10000).unref();
+}
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+</file>
+
+<file path="backend/.env">
+NODE_ENV=development
+PORT=4000
+# Local SQLite database; no server installation needed.
+DATABASE_URL="file:./dev.db"
+# Replace with a long, random secret before deployment.
+JWT_SECRET="dev-only-change-this-to-a-long-random-secret-before-deploying-9f81b5d0"
+JWT_EXPIRES_IN=1d
+SUPER_ADMIN_NAME="Super Admin"
+SUPER_ADMIN_EMAIL=admin@example.com
+SUPER_ADMIN_PASSWORD=admin@123
+# Exact frontend origins, comma-separated. Do not add a trailing slash.
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+</file>
+
+<file path="backend/.env.example">
+NODE_ENV=development
+PORT=4000
+DATABASE_URL="file:./dev.db"
+JWT_SECRET="replace-with-a-long-random-secret"
+JWT_EXPIRES_IN=1d
+SUPER_ADMIN_NAME="Super Admin"
+SUPER_ADMIN_EMAIL=admin@example.com
+SUPER_ADMIN_PASSWORD=change-this-password
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+</file>
+
+<file path="backend/package.json">
+{
+  "name": "starter-backend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:migrate": "prisma migrate dev"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.4.1",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/node": "^22.13.10",
+    "prisma": "^6.4.1",
+    "tsx": "^4.19.3",
+    "typescript": "~5.7.3"
+  }
+}
+</file>
+
+<file path="backend/tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["src/**/*.ts", "prisma/seed.ts"],
+  "exclude": ["node_modules", "dist"]
+}
+</file>
+
+<file path="frontend/src/api.ts">
+import axios from "axios";
+
+const configuredUrl = import.meta.env.VITE_API_URL?.trim();
+const baseURL = configuredUrl
+  ? configuredUrl.replace(/\/+$/, "")
+  : "http://localhost:4000/api";
+
+export const api = axios.create({
+  baseURL,
+  timeout: 15000,
+  headers: { "Content-Type": "application/json" },
+});
+
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem("starter_token");
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+export function apiError(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    return error.response?.data?.message ?? error.message ?? "Request failed";
+  }
+  return error instanceof Error ? error.message : "Something went wrong";
+}
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: "USER" | "ADMIN" | "SUPER_ADMIN";
+  isActive: boolean;
+}
+export interface Task {
+  id: string;
+  title: string;
+  description: string | null;
+  completed: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface PaginatedTasks {
+  data: Task[];
+  page: number;
+  limit: number;
+  total: number;
+  pages: number;
+}
+</file>
+
+<file path="frontend/src/App.tsx">
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { api, apiError, type Task, type User, type PaginatedTasks } from "./api";
+import { Check, Circle, ClipboardList, LogOut, Plus, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+
+type AuthMode = "login" | "register";
+
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("admin@example.com");
+  const [password, setPassword] = useState("admin@123");
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [filter, setFilter] = useState<"all" | "open" | "done">("all");
+
+  const loadMe = useCallback(async () => {
+    const token = localStorage.getItem("starter_token");
+    if (!token) return;
+    try {
+      const { data } = await api.get<{ user: User }>("/auth/me");
+      setUser(data.user);
+    } catch {
+      localStorage.removeItem("starter_token");
+      setUser(null);
+    }
+  }, []);
+
+  const loadTasks = useCallback(async () => {
+    if (!user) return;
+    setLoading(true);
+    try {
+      const { data } = await api.get<PaginatedTasks>("/tasks?page=1&limit=100");
+      setTasks(data.data);
+    } catch (error) {
+      setMessage(apiError(error));
+    } finally {
+      setLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => { void loadMe(); }, [loadMe]);
+  useEffect(() => { void loadTasks(); }, [loadTasks]);
+
+  async function submitAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage("");
+    setLoading(true);
+    try {
+      const endpoint = authMode === "login" ? "/auth/login" : "/auth/register";
+      const payload = authMode === "login" ? { email, password } : { name, email, password };
+      const { data } = await api.post<{ token: string; user: User }>(endpoint, payload);
+      localStorage.setItem("starter_token", data.token);
+      setUser(data.user);
+      setMessage(`Welcome, ${data.user.name}.`);
+    } catch (error) {
+      setMessage(apiError(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function addTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!title.trim()) return;
+    setMessage("");
+    try {
+      const { data } = await api.post<{ task: Task }>("/tasks", {
+        title: title.trim(), description: description.trim() || undefined,
+      });
+      setTasks((current) => [data.task, ...current]);
+      setTitle("");
+      setDescription("");
+    } catch (error) { setMessage(apiError(error)); }
+  }
+
+  async function toggleTask(task: Task) {
+    try {
+      const { data } = await api.patch<{ task: Task }>(`/tasks/${task.id}`, { completed: !task.completed });
+      setTasks((current) => current.map((item) => item.id === task.id ? data.task : item));
+    } catch (error) { setMessage(apiError(error)); }
+  }
+
+  async function deleteTask(id: string) {
+    try {
+      await api.delete(`/tasks/${id}`);
+      setTasks((current) => current.filter((task) => task.id !== id));
+    } catch (error) { setMessage(apiError(error)); }
+  }
+
+  function logout() {
+    localStorage.removeItem("starter_token");
+    setUser(null);
+    setTasks([]);
+    setMessage("You have signed out.");
+  }
+
+  const visibleTasks = tasks.filter((task) =>
+    filter === "all" ? true : filter === "open" ? !task.completed : task.completed,
+  );
+
+  if (!user) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card">
+          <div className="brand-mark"><ClipboardList size={25} /></div>
+          <p className="eyebrow">HEADLESS FULL-STACK STARTER</p>
+          <h1>{authMode === "login" ? "Welcome back" : "Create your account"}</h1>
+          <p className="muted">A clean foundation for your next project.</p>
+          {message && <div className="notice" role="status">{message}</div>}
+          <form className="stack" onSubmit={submitAuth}>
+            {authMode === "register" && <label>Full name<input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} required minLength={2} /></label>}
+            <label>Email address<input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
+            <label>Password<input type="password" autoComplete={authMode === "login" ? "current-password" : "new-password"} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} /></label>
+            <button className="primary full" disabled={loading}>{loading ? "Please wait…" : authMode === "login" ? "Sign in" : "Create account"}</button>
+          </form>
+          <p className="switch-auth">
+            {authMode === "login" ? "New here?" : "Already have an account?"}{" "}
+            <button className="link-button" onClick={() => { setAuthMode(authMode === "login" ? "register" : "login"); setMessage(""); }}>
+              {authMode === "login" ? "Create an account" : "Sign in"}
+            </button>
+          </p>
+          <p className="hint">Demo admin: admin@example.com · admin@123</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="#"><span className="brand-mark small"><ClipboardList size={20} /></span><span>Starter<span className="brand-light">Stack</span></span></a>
+        <div className="user-menu">
+          <div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div>
+          <div className="user-meta"><strong>{user.name}</strong><span>{user.role.replace("_", " ")}</span></div>
+          <button className="icon-button" onClick={logout} aria-label="Sign out" title="Sign out"><LogOut size={18} /></button>
+        </div>
+      </header>
+      <section className="welcome">
+        <div><p className="eyebrow">YOUR WORKSPACE</p><h1>Good to see you, {user.name.split(" ")[0]}.</h1><p className="muted">A little progress each day adds up.</p></div>
+        <div className="role-chip"><ShieldCheck size={16} /> {user.role.replaceAll("_", " ")}</div>
+      </section>
+      {message && <div className="notice page-notice" role="status">{message}<button onClick={() => setMessage("")} aria-label="Dismiss message">×</button></div>}
+      <section className="stats-grid">
+        <article className="stat-card"><span className="stat-icon"><ClipboardList size={19} /></span><span className="stat-label">Total tasks</span><strong>{tasks.length}</strong><small>In your workspace</small></article>
+        <article className="stat-card"><span className="stat-icon success"><Check size={19} /></span><span className="stat-label">Completed</span><strong>{tasks.filter((t) => t.completed).length}</strong><small>Things you've finished</small></article>
+        <article className="stat-card"><span className="stat-icon pending"><Circle size={19} /></span><span className="stat-label">In progress</span><strong>{tasks.filter((t) => !t.completed).length}</strong><small>One step at a time</small></article>
+      </section>
+      <section className="content-grid">
+        <div className="panel task-panel">
+          <div className="panel-heading"><div><h2>Tasks</h2><p className="muted">Manage your work and keep moving.</p></div><button className="icon-button" onClick={() => void loadTasks()} title="Refresh tasks" aria-label="Refresh tasks"><RefreshCw size={17} /></button></div>
+          <form className="add-task" onSubmit={addTask}>
+            <label className="sr-only" htmlFor="task-title">Task title</label>
+            <input id="task-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs to get done?" maxLength={160} required />
+            <button className="primary" type="submit"><Plus size={17} /> Add task</button>
+            <label className="sr-only" htmlFor="task-description">Task description</label>
+            <input id="task-description" className="description-input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Add a short description (optional)" maxLength={2000} />
+          </form>
+          <div className="task-toolbar">
+            <span>{visibleTasks.length} {visibleTasks.length === 1 ? "task" : "tasks"}</span>
+            <div className="filters" aria-label="Filter tasks">
+              {(["all", "open", "done"] as const).map((item) => <button key={item} className={filter === item ? "filter active" : "filter"} onClick={() => setFilter(item)}>{item === "all" ? "All" : item === "open" ? "In progress" : "Completed"}</button>)}
+            </div>
+          </div>
+          <div className="task-list">
+            {loading && <p className="empty-state">Loading your tasks…</p>}
+            {!loading && visibleTasks.length === 0 && <div className="empty-state"><span className="empty-icon"><Check size={22} /></span><strong>All clear for now</strong><p>Add a task above to get started.</p></div>}
+            {visibleTasks.map((task) => <article className={`task-row ${task.completed ? "is-done" : ""}`} key={task.id}>
+              <button className="check-button" onClick={() => void toggleTask(task)} aria-label={task.completed ? "Mark task incomplete" : "Mark task complete"}>{task.completed ? <Check size={17} /> : <Circle size={19} />}</button>
+              <div className="task-copy"><strong>{task.title}</strong>{task.description && <p>{task.description}</p>}</div>
+              <button className="icon-button delete-button" onClick={() => void deleteTask(task.id)} aria-label={`Delete ${task.title}`} title="Delete task"><Trash2 size={17} /></button>
+            </article>)}
+          </div>
+        </div>
+        <aside className="panel quick-panel"><p className="eyebrow">STARTER TOOLKIT</p><h2>Built to build on.</h2><p className="muted">A practical baseline for interviews, prototypes, and production-minded projects.</p>
+          <ul className="feature-list"><li><span><Check size={15} /></span>JWT authentication</li><li><span><Check size={15} /></span>Role-based authorization</li><li><span><Check size={15} /></span>REST API + Prisma ORM</li><li><span><Check size={15} /></span>TypeScript end to end</li><li><span><Check size={15} /></span>Responsive SPA layout</li></ul>
+          <div className="api-status"><span className="status-dot" /><div><strong>API configured</strong><small>{import.meta.env.VITE_API_URL || "http://localhost:4000/api"}</small></div></div>
+        </aside>
+      </section>
+      <footer className="footer"><span>StarterStack · Built for your next idea</span><span>React · Express · Prisma</span></footer>
+    </main>
+  );
+}
+</file>
+
+<file path="frontend/src/main.tsx">
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./styles.css";
+
+createRoot(document.getElementById("root")!).render(
+  <React.StrictMode><App /></React.StrictMode>,
+);
+</file>
+
+<file path="frontend/src/styles.css">
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+:root{font-family:'DM Sans',system-ui,sans-serif;color:#172033;background:#f5f7fb;font-synthesis:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;font-optical-sizing:auto;font-weight:400;font-size:14px}*{box-sizing:border-box}body{margin:0;min-width:320px;min-height:100vh}button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible{outline:3px solid #a5b4fc;outline-offset:2px}button:disabled{opacity:.65;cursor:wait}.auth-shell{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at top left,#e3eaff 0,transparent 42%),#f6f8fc}.auth-card{width:min(100%,420px);padding:38px;background:#fff;border:1px solid #e7ebf3;border-radius:22px;box-shadow:0 24px 70px #263a6510}.brand-mark{width:48px;height:48px;border-radius:15px;background:#4f46e5;color:#fff;display:grid;place-items:center;margin-bottom:22px}.brand-mark.small{width:36px;height:36px;border-radius:11px;margin:0}.eyebrow{font-size:10px;letter-spacing:1.5px;font-weight:700;color:#7773d8;margin:0 0 9px}.auth-card h1,.welcome h1{font:800 30px/1.2 Manrope,sans-serif;letter-spacing:-1.1px;margin:0 0 10px}.muted{color:#7a8498;line-height:1.6;margin:6px 0}.stack{display:grid;gap:17px;margin-top:26px}.stack label{display:grid;gap:8px;font-size:12px;font-weight:700;color:#424b60}.stack input,.add-task input{width:100%;border:1px solid #e0e5ef;border-radius:10px;padding:12px 13px;color:#182237;background:#fff;min-width:0}.stack input:focus,.add-task input:focus{border-color:#8c88ee;outline:3px solid #eeedff}.primary{border:0;border-radius:10px;background:#5146e5;color:white;padding:11px 15px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap;transition:background .15s}.primary:hover{background:#4338ca}.primary.full{width:100%;padding:13px}.switch-auth{text-align:center;font-size:12px;color:#7a8498;margin:22px 0 0}.link-button{border:0;background:none;color:#4f46e5;font-weight:700;padding:3px}.hint{font-size:11px;text-align:center;color:#9aa2b1;margin:20px 0 0}.notice{padding:11px 13px;border-radius:10px;background:#fff7ed;color:#9a3412;border:1px solid #fed7aa;font-size:12px;margin-top:16px;overflow-wrap:anywhere}.app-shell{max-width:1240px;margin:0 auto;padding:0 36px}.topbar{height:76px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e8ebf2}.brand{display:flex;align-items:center;gap:10px;color:#182237;text-decoration:none;font:800 17px Manrope,sans-serif;letter-spacing:-.5px}.brand-light{font-weight:500;color:#7d879a}.user-menu{display:flex;align-items:center;gap:10px}.avatar{width:35px;height:35px;border-radius:50%;display:grid;place-items:center;background:#e8e7ff;color:#5146e5;font-weight:700}.user-meta{display:grid;gap:3px;min-width:110px}.user-meta strong{font-size:12px}.user-meta span{font-size:10px;color:#858da0}.icon-button{border:0;background:transparent;color:#7a8498;width:34px;height:34px;border-radius:9px;display:grid;place-items:center}.icon-button:hover{background:#f0f1f8;color:#4f46e5}.welcome{padding:35px 0 25px;display:flex;align-items:center;justify-content:space-between;gap:20px}.welcome h1{font-size:27px}.welcome .muted{font-size:13px}.role-chip{display:flex;align-items:center;gap:7px;background:#eeedff;color:#5146d9;padding:9px 12px;border-radius:9px;font-size:10px;font-weight:700;white-space:nowrap}.page-notice{margin:0 0 18px;display:flex;justify-content:space-between}.page-notice button{border:0;background:none;color:inherit;font-size:20px}.stats-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:17px}.stat-card{background:#fff;border:1px solid #e9edf4;border-radius:15px;padding:19px 21px;display:grid;justify-items:start;box-shadow:0 4px 14px #1d2e4a04}.stat-icon{width:35px;height:35px;display:grid;place-items:center;border-radius:11px;background:#eeedff;color:#6256e8;margin-bottom:13px}.stat-icon.success{background:#e5f8ee;color:#15945a}.stat-icon.pending{background:#fff4df;color:#c38320}.stat-label{font-size:11px;color:#7c8699}.stat-card strong{font:800 26px Manrope,sans-serif;letter-spacing:-1px;margin:5px 0}.stat-card small{font-size:10px;color:#a0a7b5}.content-grid{display:grid;grid-template-columns:minmax(0,1.75fr) minmax(240px,1fr);gap:18px;margin-top:20px;align-items:start}.panel{background:#fff;border:1px solid #e9edf4;border-radius:15px;padding:23px;min-width:0}.panel-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.panel h2{font:800 17px Manrope,sans-serif;letter-spacing:-.4px;margin:0}.panel-heading .muted{font-size:11px;margin-top:5px}.add-task{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;margin-top:21px}.add-task input{font-size:12px}.description-input{grid-column:1/-1}.task-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:22px;padding-bottom:13px;border-bottom:1px solid #eef0f5;color:#818a9c;font-size:11px}.filters{display:flex;gap:4px;background:#f5f6fa;border-radius:8px;padding:3px}.filter{border:0;background:transparent;padding:6px 8px;border-radius:6px;color:#7c8598;font-size:10px;white-space:nowrap}.filter.active{background:#fff;color:#4f46e5;box-shadow:0 1px 4px #1c2a4510;font-weight:700}.task-row{display:flex;align-items:center;gap:12px;padding:15px 0;border-bottom:1px solid #f0f2f6;min-width:0}.task-row:last-child{border-bottom:0}.check-button{border:0;background:none;color:#b3bac8;padding:3px;display:grid;place-items:center;flex-shrink:0}.task-row:not(.is-done) .check-button:hover{color:#5146e5}.task-copy{flex:1;min-width:0}.task-copy strong{font-size:12px;font-weight:600;overflow-wrap:anywhere}.task-copy p{font-size:11px;line-height:1.5;color:#929aab;margin:5px 0 0;overflow-wrap:anywhere}.is-done .task-copy strong{text-decoration:line-through;color:#a3aaba}.is-done .check-button{color:#20a66a}.delete-button{opacity:.5;flex-shrink:0}.delete-button:hover{opacity:1;color:#dc4545;background:#fff0f0}.empty-state{padding:29px 10px;text-align:center;color:#8992a4;font-size:12px}.empty-state strong{display:block;color:#515b70;margin-top:10px}.empty-state p{margin:5px 0}.empty-icon{display:inline-grid;place-items:center;background:#e5f8ee;color:#15945a;border-radius:50%;width:40px;height:40px}.quick-panel{padding:24px}.quick-panel h2{font-size:20px}.quick-panel>.muted{font-size:12px;margin:9px 0 19px}.feature-list{list-style:none;padding:0;margin:0;display:grid;gap:15px}.feature-list li{display:flex;align-items:center;gap:10px;font-size:11px;color:#586276}.feature-list li span{width:21px;height:21px;display:grid;place-items:center;background:#e9f8ef;color:#15945a;border-radius:7px;flex-shrink:0}.api-status{border-top:1px solid #eef0f5;margin-top:23px;padding-top:17px;display:flex;gap:9px;align-items:flex-start}.status-dot{width:7px;height:7px;background:#20b26b;border-radius:50%;margin-top:4px;box-shadow:0 0 0 4px #e7f8ef;flex-shrink:0}.api-status div{display:grid;gap:5px;min-width:0}.api-status strong{font-size:10px}.api-status small{font-size:10px;color:#8992a4;overflow-wrap:anywhere;line-height:1.5}.footer{display:flex;justify-content:space-between;gap:12px;padding:25px 0 30px;margin-top:13px;color:#9aa2b2;font-size:10px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:850px){.app-shell{padding:0 22px}.content-grid{grid-template-columns:minmax(0,1fr)}.quick-panel{display:grid;grid-template-columns:1fr 1fr;column-gap:22px}.quick-panel .eyebrow,.quick-panel h2,.quick-panel>p{grid-column:1/-1}.feature-list{grid-column:1}.api-status{grid-column:2;grid-row:4;border-top:0;border-left:1px solid #eef0f5;padding:0 0 0 18px;margin:0}}@media(max-width:560px){.app-shell{padding:0 15px}.topbar{height:66px}.user-meta{display:none}.welcome{align-items:flex-start;flex-direction:column;padding:27px 0 20px}.welcome h1{font-size:23px}.stats-grid{gap:9px}.stat-card{padding:14px 12px}.stat-icon{width:30px;height:30px;margin-bottom:10px}.stat-card strong{font-size:23px}.stat-card small{font-size:9px}.stat-label{font-size:10px}.panel{padding:17px}.add-task{grid-template-columns:minmax(0,1fr)}.add-task .primary{width:100%}.description-input{grid-column:auto}.task-toolbar{align-items:flex-start;flex-direction:column}.filters{width:100%;justify-content:space-between}.filter{flex:1}.quick-panel{display:block}.api-status{border-left:0;border-top:1px solid #eef0f5;padding:17px 0 0;margin-top:20px}.footer{flex-direction:column;gap:7px}.auth-card{padding:28px 22px}}
+</file>
+
+<file path="frontend/.env">
+# Leave blank to use the local backend automatically.
+# For deployed API, set e.g. https://api.example.com/api
+VITE_API_URL=
+</file>
+
+<file path="frontend/.env.example">
+VITE_API_URL=
+</file>
+
+<file path="frontend/index.html">
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#101827" />
+    <meta name="description" content="A headless full-stack starter application" />
+    <title>Full-Stack Starter</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+</file>
+
+<file path="frontend/package.json">
+{
+  "name": "starter-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.8.4",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.3",
+    "vite": "^6.1.0"
+  }
+}
+</file>
+
+<file path="frontend/tsconfig.app.json">
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}
+</file>
+
+<file path="frontend/tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}
+</file>
+
+<file path="frontend/tsconfig.node.json">
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true
+  },
+  "include": ["vite.config.ts"]
+}
+</file>
+
+<file path="frontend/vite.config.ts">
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({ plugins: [react()] });
+</file>
+
+<file path=".gitignore">
+node_modules/
+**/node_modules/
+**/dist/
+**/.env.local
+**/.env.*.local
+backend/prisma/*.db
+backend/prisma/*.db-journal
+coverage/
+.DS_Store
+*.log
+.repomix-output.xml
+</file>
+
+<file path="package.json">
+{
+  "name": "headless-fullstack-starter",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Decoupled TypeScript React/Vite + Express REST API + Prisma starter",
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm run build --prefix backend && npm run build --prefix frontend",
+    "typecheck": "npm run typecheck --prefix backend && npm run typecheck --prefix frontend",
+    "db:generate": "npm --prefix backend run db:generate",
+    "db:push": "npm --prefix backend run db:push",
+    "db:seed": "npm --prefix backend run db:seed",
+    "db:setup": "npm run db:generate && npm run db:push && npm run db:seed"
+  },
+  "devDependencies": { "concurrently": "^9.1.2" },
+  "engines": { "node": ">=20.19.0", "npm": ">=10.0.0" }
+}
+</file>
+
+<file path="README.md">
+# Headless Full-Stack Starter (TypeScript)
+
+A decoupled React + Vite SPA and Express REST API, using Prisma ORM, JWT authentication, role-based authorization, validation, CRUD examples, and a root dev command.
+
+## Requirements
+- Node.js 20.19+ (or a current supported Node 22 release) and npm
+- No database server is required for the default local setup: SQLite is used.
+
+## Quick start
+
+```bash
+npm install
+npm install --prefix backend
+npm install --prefix frontend
+npm run db:setup
+npm run dev
+```
+
+Open the Vite URL printed in the terminal (normally `http://localhost:5173`). API health check: `http://localhost:4000/api/health`.
+
+Run each side independently with `npm run dev:backend` and `npm run dev:frontend`, or from the relevant directory with `npm run dev`.
+
+### Default super-admin
+- Email: `admin@example.com`
+- Password: `admin@123`
+
+These are development defaults only. Change them in `backend/.env` before any shared, public, or production deployment. The seed creates/updates the configured admin account. Re-run `npm run db:seed` after changing credentials.
+
+## Environment files
+- `frontend/.env`: `VITE_API_URL` controls the API base URL. Empty means the local API at `http://localhost:4000/api`.
+- `backend/.env`: database URL, JWT secret, seed-admin credentials, port, and allowed browser origins.
+- `backend/.env.example` and `frontend/.env.example` document the variables. Local `.env` files are included as requested for clone-and-run convenience; **never commit real production secrets**. Replace the sample JWT secret and credentials before deployment.
+
+Vite variables prefixed with `VITE_` are embedded in browser code and are public. Do not put secrets in frontend `.env`.
+
+## Security model: important CORS limitation
+The backend validates browser `Origin` against `CORS_ORIGINS` and rejects disallowed origins when an Origin header is present. Configure it in **backend/.env** to match the frontend origins, for example:
+`CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,https://your-app.example.com`
+
+The frontend `.env` cannot securely control backend access: it is delivered to every browser user and can be changed by anyone. CORS is a browser policy, **not authentication or a firewall**; scripts such as curl/server clients can spoof or omit Origin. Actual access control is enforced by JWT authentication, authorization, validation, and deployment/network controls. Do not rely on CORS alone to protect sensitive APIs.
+
+## Included features
+- Strict TypeScript for frontend and backend
+- React SPA with responsive layout and API-backed task CRUD
+- REST endpoints under `/api`
+- Register/login/current-user/logout UI; bcrypt password hashing; signed JWT; role-based guards
+- Roles: `USER`, `ADMIN`, `SUPER_ADMIN`
+- Example task CRUD, pagination, Zod request validation, centralized errors
+- User listing/deactivation for admins; super-admin seed
+- Helmet, rate limiting, CORS allowlist, request-size limit, Prisma
+- Root scripts for concurrent dev, build, typecheck, and database setup
+- Repomix config; environment files are included by Repomix because `.gitignore` does not exclude `.env`
+
+## REST API overview
+- `GET /api/health` — health check
+- `POST /api/auth/register` — create user
+- `POST /api/auth/login` — login
+- `GET /api/auth/me` — current authenticated user
+- `GET /api/tasks?page=1&limit=10` — list own tasks (admins can see all)
+- `POST /api/tasks` — create task
+- `GET /api/tasks/:id`, `PATCH /api/tasks/:id`, `DELETE /api/tasks/:id`
+- `GET /api/users` — admin/super-admin list users
+- `PATCH /api/users/:id/role` — super-admin role update
+- `PATCH /api/users/:id/status` — admin deactivate/reactivate users
+
+All protected routes require `Authorization: Bearer <token>`. The browser demo stores its token in `localStorage` for simplicity. For production apps with higher security requirements, consider secure, HttpOnly, SameSite cookies plus CSRF protections and a refresh-token rotation strategy.
+
+## Prisma database switching
+Prisma is the data-access layer; it does not make every database interchangeable by changing only the URL. **Both** `backend/prisma/schema.prisma`'s `provider` and `DATABASE_URL` must match the target connector. Provider changes can require schema adjustments and new migrations. MongoDB uses a different ID/relation model and requires Mongo-compatible schema changes; it is not a drop-in swap for this relational SQLite schema. Back up data and follow Prisma's provider-specific migration/import guidance when switching.
+
+Default SQLite:
+```prisma
+provider = "sqlite"
+url      = env("DATABASE_URL")
+```
+`backend/.env` uses `DATABASE_URL="file:./dev.db"`.
+
+For PostgreSQL, change provider to `postgresql` and set a PostgreSQL URL. For MySQL use `mysql`; for MongoDB use `mongodb` and adapt the schema (including `@db.ObjectId` IDs and relation rules) per Prisma documentation. Then run `npm run db:generate` and the provider-appropriate migration/deployment workflow. `db:push` is convenient for local prototyping; use reviewed migrations (`prisma migrate dev` / `prisma migrate deploy`) for relational production databases. MongoDB uses `prisma db push`, not Prisma Migrate.
+
+## Deployment (Render, AWS, VPS)
+Deploy frontend and backend as separate services. Set frontend `VITE_API_URL` to the deployed API base URL, e.g. `https://api.example.com/api`; set backend `CORS_ORIGINS` to the exact deployed frontend origin(s), `DATABASE_URL` to your managed database, `JWT_SECRET` to a long random secret, and `NODE_ENV=production`. Build with `npm ci && npm run build` at root, or install/build each service independently. Backend start command: `npm start --prefix backend`; frontend static output: `frontend/dist` (configure SPA fallback to `index.html`). Configure environment variables in the hosting provider rather than committing production `.env` files.
+
+For production relational databases, create and apply migrations as part of release/deployment. Do not expose the database publicly unless required; use managed database networking and TLS.
+
+## Git and Repomix
+`repomix.config.json` includes `frontend/**` and `backend/**`, including `.env` files. This is intentional per request, but it means a generated XML bundle may contain secrets. **Do not share or upload `repomix-output.xml` to an LLM until you have scrubbed secrets.** Repomix has security checks, but they are not a substitute for manual review.
+
+## Project structure
+```text
+frontend/       React/Vite SPA
+backend/        Express REST API, Prisma schema and seed
+repomix.config.json
+package.json    root orchestration scripts
+```
+</file>
+
+<file path="repomix.config.json">
+{
+  "$schema": "https://repomix.com/schemas/latest/schema.json",
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "parsableStyle": false,
+    "fileSummary": true,
+    "directoryStructure": true,
+    "removeComments": false,
+    "removeEmptyLines": false,
+    "showLineNumbers": false,
+    "copyToClipboard": false
+  },
+  "include": [
+    "frontend/**",
+    "backend/**",
+    "package.json",
+    "README.md",
+    "repomix.config.json",
+    ".gitignore"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/coverage/**",
+      "repomix-output.xml"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}
+</file>
+
+</files>

@@ -1,0 +1,11 @@
+node_modules/
+**/node_modules/
+**/dist/
+**/.env.local
+**/.env.*.local
+backend/prisma/*.db
+backend/prisma/*.db-journal
+coverage/
+.DS_Store
+*.log
+.repomix-output.xml

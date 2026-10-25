@@ -1,0 +1,35 @@
+{
+  "$schema": "https://repomix.com/schemas/latest/schema.json",
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "parsableStyle": false,
+    "fileSummary": true,
+    "directoryStructure": true,
+    "removeComments": false,
+    "removeEmptyLines": false,
+    "showLineNumbers": false,
+    "copyToClipboard": false
+  },
+  "include": [
+    "frontend/**",
+    "backend/**",
+    "package.json",
+    "README.md",
+    "repomix.config.json",
+    ".gitignore"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/coverage/**",
+      "repomix-output.xml"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}
